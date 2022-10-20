@@ -1,6 +1,6 @@
 
 import { getInput, info, setFailed, setOutput } from "@actions/core";
-import { AppRunnerClient, CreateServiceCommand, ListServicesCommand, ListServicesCommandOutput, UpdateServiceCommand, DescribeServiceCommand, ImageRepositoryType } from "@aws-sdk/client-apprunner";
+import { AppRunnerClient, CreateServiceCommand, ListServicesCommand, ListServicesCommandOutput, UpdateServiceCommand, DescribeServiceCommand, ImageRepositoryType, ServiceSummary } from "@aws-sdk/client-apprunner";
 import { debug } from '@actions/core';
 
 //https://docs.aws.amazon.com/apprunner/latest/api/API_CodeConfigurationValues.html
@@ -30,7 +30,7 @@ function getInputInt(name: string, defaultValue: number): number {
     return isNaN(result) ? defaultValue : result;
 }
 
-async function getServiceArn(client: AppRunnerClient, serviceName: string): Promise<string | undefined> {
+async function getServiceArn(client: AppRunnerClient, serviceName: string): Promise<ServiceSummary | undefined> {
 
     let nextToken: string | undefined = undefined;
 
@@ -45,7 +45,7 @@ async function getServiceArn(client: AppRunnerClient, serviceName: string): Prom
         if (listServiceResponse.ServiceSummaryList) {
             for (const service of listServiceResponse.ServiceSummaryList) {
                 if (service.ServiceName === serviceName) {
-                    return service.ServiceArn
+                    return service
                 }
             }
         }
@@ -117,11 +117,9 @@ export async function run(): Promise<void> {
         const client = new AppRunnerClient({ region: region });
 
         // Check whether service exists and get ServiceArn
-        let serviceArn = await getServiceArn(client, serviceName);
+        let serviceSummary = await getServiceArn(client, serviceName);
 
-        // New service or update to existing service
-        let serviceId: string | undefined = undefined;
-        if (!serviceArn) {
+        if (!serviceSummary?.ServiceArn) {
             info(`Creating service ${serviceName}`);
             const command = new CreateServiceCommand({
                 ServiceName: serviceName,
@@ -171,13 +169,12 @@ export async function run(): Promise<void> {
                 };
             }
             const createServiceResponse = await client.send(command);
-            serviceId = createServiceResponse.Service?.ServiceId;
-            info(`Service creation initiated with service ID - ${serviceId}`)
-            serviceArn = createServiceResponse.Service?.ServiceArn;
+            serviceSummary = createServiceResponse.Service;
+            info(`Service creation initiated with service ID - ${serviceSummary}`)
         } else {
             info(`Updating existing service ${serviceName}`);
             const command = new UpdateServiceCommand({
-                ServiceArn: serviceArn,
+                ServiceArn: serviceSummary.ServiceArn,
                 SourceConfiguration: {}
             });
             if (isImageBased) {
@@ -219,22 +216,24 @@ export async function run(): Promise<void> {
                 };
             }
             const updateServiceResponse = await client.send(command);
-            serviceId = updateServiceResponse.Service?.ServiceId;
-            info(`Service update initiated with operation ID - ${serviceId}`)
-            serviceArn = updateServiceResponse.Service?.ServiceArn;
+            serviceSummary = updateServiceResponse.Service;
+            info(`Service update initiated with operation ID - ${serviceSummary}`)
         }
 
         // Set output
-        setOutput('service-id', serviceId);
+        setOutput('service-id', serviceSummary?.ServiceId);
+        setOutput('service-arn', serviceSummary?.ServiceArn);
+        setOutput('service-url', serviceSummary?.ServiceUrl);
+        setOutput('service-status', serviceSummary?.Status);
 
         // Wait for service to be stable (if required)
         if (waitForService === "true") {
             let attempts = 0;
             let status = OPERATION_IN_PROGRESS;
-            info(`Waiting for the service ${serviceId} to reach stable state`);
+            info(`Waiting for the service ${serviceSummary?.ServiceId} to reach stable state`);
             while (status === OPERATION_IN_PROGRESS && attempts < MAX_ATTEMPTS) {
                 const describeServiceResponse = await client.send(new DescribeServiceCommand({
-                    ServiceArn: serviceArn
+                    ServiceArn: serviceSummary?.ServiceArn
                 }));
 
                 status = describeServiceResponse.Service?.Status ?? OPERATION_IN_PROGRESS;
@@ -250,9 +249,9 @@ export async function run(): Promise<void> {
             if (attempts >= MAX_ATTEMPTS)
                 throw new Error(`Service did not reach stable state after ${attempts} attempts`);
             else
-                info(`Service ${serviceId} has reached the stable state ${status}`);
+                info(`Service ${serviceSummary?.ServiceId} has reached the stable state ${status}`);
         } else {
-            info(`Service ${serviceId} has started creation. Watch for creation progress in AppRunner console`);
+            info(`Service ${serviceSummary?.ServiceId} has started creation. Watch for creation progress in AppRunner console`);
         }
     } catch (error) {
         if (error instanceof Error) {
